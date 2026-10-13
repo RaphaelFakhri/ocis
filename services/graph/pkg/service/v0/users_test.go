@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"time"
 
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	userv1beta1 "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
@@ -1101,6 +1102,47 @@ var _ = Describe("Users", func() {
 
 				Expect(rr.Code).To(Equal(http.StatusOK))
 			})
+
+			It("never calls the OCM gateway when OCM sharing is disabled", func() {
+				expectRoles()
+				expectAssignments(eligibleUser, []*settingsmsg.UserRoleAssignment{
+					{Id: "assignment-ID", AccountUuid: eligibleUser, RoleId: vaultRole},
+				}, nil)
+				expectAssignments(otherUser, nil, nil)
+
+				res := requestVaultEligibleUsers("vaultEligible eq true")
+				Expect(res.Value).To(HaveLen(1))
+				Expect(res.Value[0].GetId()).To(Equal(eligibleUser))
+
+				gatewayClient.AssertNotCalled(GinkgoT(), "FindAcceptedUsers", mock.Anything, mock.Anything)
+			})
+
+			It("is allowed for an unprivileged user combining three individually-acceptable clauses", func() {
+				expectRoles()
+				expectAssignments(eligibleUser, []*settingsmsg.UserRoleAssignment{
+					{Id: "assignment-ID", AccountUuid: eligibleUser, RoleId: vaultRole},
+				}, nil)
+				expectAssignments(otherUser, nil, nil)
+				permissionService.On("GetPermissionByID", mock.Anything, mock.Anything).Unset()
+				permissionService.On("GetPermissionByID", mock.Anything, mock.Anything).
+					Return(&settings.GetPermissionByIDResponse{}, nil)
+
+				r := httptest.NewRequest(http.MethodGet,
+					`/graph/v1.0/users?$search=%22abc%22&$filter=`+
+						url.QueryEscape("userType eq 'Member' and vaultEligible eq true and userType eq 'Member'"), nil)
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+			})
+
+			It("rejects an 'or' nested inside an 'and', even for an unprivileged user", func() {
+				r := httptest.NewRequest(http.MethodGet,
+					`/graph/v1.0/users?$search=%22abc%22&$filter=`+
+						url.QueryEscape("(userType eq 'Member' or vaultEligible eq true) and userType eq 'Guest'"), nil)
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusForbidden))
+			})
 		})
 
 		Describe("GetUser", func() {
@@ -1940,6 +1982,262 @@ var _ = Describe("Users", func() {
 				Expect(len(res.Value)).To(Equal(1))
 				Expect(res.Value[0].GetId()).To(Equal("user1"))
 				Expect(res.Value[0].GetUserType()).To(Equal("Member"))
+			})
+		})
+
+		Describe("the vaultEligible filter, with a federated OCM sharee", func() {
+			const (
+				vaultRole     = "vault-granting-role-ID"
+				federatedUser = "federated"
+			)
+
+			mockPermissionAllowsVault := func() {
+				permissionService.On("GetPermissionByID", mock.Anything, mock.Anything).Return(&settings.GetPermissionByIDResponse{
+					Permission: &settingsmsg.Permission{
+						Operation:  settingsmsg.Permission_OPERATION_UNKNOWN,
+						Constraint: settingsmsg.Permission_CONSTRAINT_ALL,
+					},
+				}, nil)
+			}
+
+			mockVaultGrantingRoleFor := func(accountUUID string) {
+				roleService.On("ListRoles", mock.Anything, mock.Anything, mock.Anything).Return(&settings.ListBundlesResponse{
+					Bundles: []*settingsmsg.Bundle{
+						{
+							Id:   vaultRole,
+							Type: settingsmsg.Bundle_TYPE_ROLE,
+							Settings: []*settingsmsg.Setting{
+								{
+									Name:  permission.VaultMode,
+									Value: &settingsmsg.Setting_PermissionValue{PermissionValue: &settingsmsg.Permission{}},
+								},
+							},
+						},
+					},
+				}, nil)
+				roleService.On("ListRoleAssignments", mock.Anything, mock.MatchedBy(
+					func(in *settings.ListRoleAssignmentsRequest) bool {
+						return in.GetAccountUuid() == accountUUID
+					}), mock.Anything).Return(&settings.ListRoleAssignmentsResponse{
+					Assignments: []*settingsmsg.UserRoleAssignment{
+						{Id: "assignment-ID", AccountUuid: accountUUID, RoleId: vaultRole},
+					},
+				}, nil)
+			}
+
+			// A light user invited from another instance is only resolvable through OCM's
+			// accepted-users list, not the identity backend's own directory search.
+			It("still finds a federated user who is already an accepted OCM sharee", func() {
+				mockPermissionAllowsVault()
+
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Return([]*libregraph.User{}, nil)
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).Return(&invitepb.FindAcceptedUsersResponse{
+					Status: status.NewOK(ctx),
+					AcceptedUsers: []*userv1beta1.User{
+						{
+							Username: federatedUser,
+							Id: &userv1beta1.UserId{
+								OpaqueId: federatedUser,
+								Type:     userv1beta1.UserType_USER_TYPE_FEDERATED,
+							},
+						},
+					},
+				}, nil)
+
+				mockVaultGrantingRoleFor(federatedUser)
+
+				r := httptest.NewRequest(http.MethodGet, "/graph/v1.0/users?$filter="+url.QueryEscape("vaultEligible eq true"), nil)
+				r = r.WithContext(revactx.SetMFA(r.Context()))
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				data, err := io.ReadAll(rr.Body)
+				Expect(err).ToNot(HaveOccurred())
+				res := userList{}
+				Expect(json.Unmarshal(data, &res)).To(Succeed())
+
+				Expect(res.Value).To(HaveLen(1))
+				Expect(res.Value[0].GetId()).To(Equal(federatedUser))
+			})
+
+			// The directory search and the OCM search are independent I/O calls; they must run
+			// concurrently rather than one after the other.
+			It("runs the directory search and the OCM search concurrently", func() {
+				mockPermissionAllowsVault()
+
+				identityStarted := make(chan struct{})
+				ocmStarted := make(chan struct{})
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Run(func(mock.Arguments) {
+					close(identityStarted)
+					select {
+					case <-ocmStarted:
+					case <-time.After(2 * time.Second):
+						Fail("OCM search did not start concurrently with the directory search")
+					}
+				}).Return([]*libregraph.User{}, nil)
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).Run(func(mock.Arguments) {
+					close(ocmStarted)
+					select {
+					case <-identityStarted:
+					case <-time.After(2 * time.Second):
+						Fail("directory search did not start concurrently with the OCM search")
+					}
+				}).Return(&invitepb.FindAcceptedUsersResponse{
+					Status:        status.NewOK(ctx),
+					AcceptedUsers: []*userv1beta1.User{},
+				}, nil)
+
+				r := httptest.NewRequest(http.MethodGet, "/graph/v1.0/users?$filter="+url.QueryEscape("vaultEligible eq true"), nil)
+				r = r.WithContext(revactx.SetMFA(r.Context()))
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+			})
+
+			// FindAcceptedUsers returning the same account twice (e.g. a duplicate invite
+			// record) must not surface as a duplicated recipient in the picker.
+			It("dedupes two accepted-user records that resolve to the same federated account id", func() {
+				mockPermissionAllowsVault()
+
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Return([]*libregraph.User{}, nil)
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).Return(&invitepb.FindAcceptedUsersResponse{
+					Status: status.NewOK(ctx),
+					AcceptedUsers: []*userv1beta1.User{
+						{
+							Username: federatedUser,
+							Id: &userv1beta1.UserId{
+								OpaqueId: federatedUser,
+								Type:     userv1beta1.UserType_USER_TYPE_FEDERATED,
+							},
+						},
+						{
+							Username: federatedUser,
+							Id: &userv1beta1.UserId{
+								OpaqueId: federatedUser,
+								Type:     userv1beta1.UserType_USER_TYPE_FEDERATED,
+							},
+						},
+					},
+				}, nil)
+
+				mockVaultGrantingRoleFor(federatedUser)
+
+				r := httptest.NewRequest(http.MethodGet, "/graph/v1.0/users?$filter="+url.QueryEscape("vaultEligible eq true"), nil)
+				r = r.WithContext(revactx.SetMFA(r.Context()))
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				data, err := io.ReadAll(rr.Body)
+				Expect(err).ToNot(HaveOccurred())
+				res := userList{}
+				Expect(json.Unmarshal(data, &res)).To(Succeed())
+
+				Expect(res.Value).To(HaveLen(1))
+				Expect(res.Value[0].GetId()).To(Equal(federatedUser))
+			})
+
+			// InviteCollaboratorForm.vue's External+Vault tab sends this combined filter, and
+			// the picker is used by ordinary users, not just admins.
+			It("is allowed for an unprivileged user combining the Federated and vaultEligible filters", func() {
+				permissionService.On("GetPermissionByID", mock.Anything, mock.Anything).Return(&settings.GetPermissionByIDResponse{}, nil)
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Return([]*libregraph.User{}, nil)
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).Return(&invitepb.FindAcceptedUsersResponse{
+					Status:        status.NewOK(ctx),
+					AcceptedUsers: []*userv1beta1.User{},
+				}, nil)
+
+				r := httptest.NewRequest(http.MethodGet,
+					`/graph/v1.0/users?$search=%22abc%22&$filter=`+
+						url.QueryEscape("(userType eq 'Federated') and (vaultEligible eq true)"), nil)
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+			})
+
+			// A purely internal vault share never touches OCM, so an OCM/gateway outage must
+			// not fail it: the OCM lookup is a best-effort addition to the directory search.
+			It("still returns the directory results when the OCM accepted-users lookup fails", func() {
+				const localUser = "local-user"
+
+				mockPermissionAllowsVault()
+
+				local := &libregraph.User{}
+				local.SetId(localUser)
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Return([]*libregraph.User{local}, nil)
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).
+					Return(nil, errors.New("ocm gateway unavailable"))
+
+				mockVaultGrantingRoleFor(localUser)
+
+				r := httptest.NewRequest(http.MethodGet, "/graph/v1.0/users?$filter="+url.QueryEscape("vaultEligible eq true"), nil)
+				r = r.WithContext(revactx.SetMFA(r.Context()))
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				data, err := io.ReadAll(rr.Body)
+				Expect(err).ToNot(HaveOccurred())
+				res := userList{}
+				Expect(json.Unmarshal(data, &res)).To(Succeed())
+
+				Expect(res.Value).To(HaveLen(1))
+				Expect(res.Value[0].GetId()).To(Equal(localUser))
+			})
+
+			It("still returns the directory results when the OCM accepted-users lookup is too slow", func() {
+				const localUser = "local-user"
+
+				originalTimeout := *service.VaultEligibleOCMSearchTimeout
+				*service.VaultEligibleOCMSearchTimeout = 10 * time.Millisecond
+				DeferCleanup(func() { *service.VaultEligibleOCMSearchTimeout = originalTimeout })
+
+				mockPermissionAllowsVault()
+
+				local := &libregraph.User{}
+				local.SetId(localUser)
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Return([]*libregraph.User{local}, nil)
+				// a plain time.Sleep here wouldn't exercise the timeout, since it ignores ctx
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					gwCtx := args.Get(0).(context.Context)
+					select {
+					case <-gwCtx.Done():
+					case <-time.After(2 * time.Second):
+						Fail("FindAcceptedUsers' context was never canceled by the OCM search timeout")
+					}
+				}).Return(nil, context.DeadlineExceeded)
+
+				mockVaultGrantingRoleFor(localUser)
+
+				r := httptest.NewRequest(http.MethodGet, "/graph/v1.0/users?$filter="+url.QueryEscape("vaultEligible eq true"), nil)
+				r = r.WithContext(revactx.SetMFA(r.Context()))
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				data, err := io.ReadAll(rr.Body)
+				Expect(err).ToNot(HaveOccurred())
+				res := userList{}
+				Expect(json.Unmarshal(data, &res)).To(Succeed())
+
+				Expect(res.Value).To(HaveLen(1))
+				Expect(res.Value[0].GetId()).To(Equal(localUser))
+			})
+
+			// Each half of the combined filter independently calls the OCM gateway; querying
+			// it twice per request doubles load and risks the two calls seeing different results.
+			It("searches OCM accepted users only once for the combined Federated+vaultEligible filter", func() {
+				mockPermissionAllowsVault()
+				identityBackend.On("GetUsers", mock.Anything, mock.Anything).Return([]*libregraph.User{}, nil)
+				gatewayClient.On("FindAcceptedUsers", mock.Anything, mock.Anything).Return(&invitepb.FindAcceptedUsersResponse{
+					Status:        status.NewOK(ctx),
+					AcceptedUsers: []*userv1beta1.User{},
+				}, nil)
+
+				r := httptest.NewRequest(http.MethodGet, "/graph/v1.0/users?$filter="+
+					url.QueryEscape("(userType eq 'Federated') and (vaultEligible eq true)"), nil)
+				r = r.WithContext(revactx.SetMFA(r.Context()))
+				svc.GetUsers(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				gatewayClient.AssertNumberOfCalls(GinkgoT(), "FindAcceptedUsers", 1)
 			})
 		})
 	})

@@ -339,62 +339,81 @@ const createSharesConcurrentRequests = computed(() => {
   return configStore.options.concurrentRequests.shares.create
 })
 
-const fetchRecipientsTask = useTask(function* (signal, query: string) {
-  let filter: string
+const recipientSearchFilter = computed<string | undefined>(() => {
+  if (unref(isExternalShareRoleType) && unref(isVaultResource)) {
+    return `(userType eq 'Federated') and (vaultEligible eq true)`
+  }
   if (unref(isExternalShareRoleType)) {
-    // filter for external user types only
-    filter = `(userType eq 'Federated')`
-  } else if (unref(isVaultResource)) {
+    // external users only
+    return `userType eq 'Federated'`
+  }
+  if (unref(isVaultResource)) {
     // users without vault access can never open a vault resource, so they must not be
     // offered as recipients in the first place
-    filter = `vaultEligible eq true`
+    return `vaultEligible eq true`
   }
+  return undefined
+})
 
+// groups are only available for internal shares, and never for vault resources: the vault
+// permission is assigned per account, so a group can never hold it
+const allowGroupResults = computed(() => !unref(isExternalShareRoleType) && !unref(isVaultResource))
+
+const fetchRecipientsTask = useTask(function* (signal, query: string) {
   const client = clientService.graphAuthenticated
-  const userData = yield* call(
-    client.users.listUsers({ orderBy: ['displayName'], search: `"${query}"`, filter }, { signal })
-  )
-
-  let groupData: Group[]
-  if (!unref(isExternalShareRoleType) && !unref(isVaultResource)) {
-    // groups are only available for internal shares, and never for vault resources: the
-    // vault permission is assigned per account, so a group can never hold it
-    groupData = yield* call(
-      client.groups.listGroups({ orderBy: ['displayName'], search: `"${query}"` }, { signal })
+  // keeps the hand-managed spinner from sticking if listUsers/listGroups rejects
+  try {
+    const userData = yield* call(
+      client.users.listUsers(
+        { orderBy: ['displayName'], search: `"${query}"`, filter: unref(recipientSearchFilter) },
+        { signal }
+      )
     )
-  }
 
-  const users = (userData || []).map((u) => ({
-    ...u,
-    shareType: unref(isExternalShareRoleType) ? ShareTypes.remote.value : ShareTypes.user.value
-  })) as CollaboratorAutoCompleteItem[]
-
-  const groups = (groupData || []).map((u) => ({
-    ...u,
-    shareType: ShareTypes.group.value
-  })) as CollaboratorAutoCompleteItem[]
-
-  autocompleteResults.value = [...users, ...groups].filter(
-    (collaborator: CollaboratorAutoCompleteItem) => {
-      if (collaborator.id === userStore.user.id) {
-        // filter current user
-        return false
-      }
-
-      const selected = unref(selectedCollaborators).some(({ id }) => collaborator.id === id)
-      const existingShares = unref(collaboratorShares).filter((c) => !c.indirect)
-      const exists = existingShares.some((s) => s.sharedWith.id === collaborator.id)
-
-      if (selected || exists) {
-        return false
-      }
-
-      announcement.value = $gettext('Person was added')
-
-      return true
+    let groupData: Group[]
+    if (unref(allowGroupResults)) {
+      groupData = yield* call(
+        client.groups.listGroups({ orderBy: ['displayName'], search: `"${query}"` }, { signal })
+      )
     }
-  )
-  searchInProgress.value = false
+
+    const users = (userData || []).map((u) => ({
+      ...u,
+      shareType: u.userType === 'Federated' ? ShareTypes.remote.value : ShareTypes.user.value
+    })) as CollaboratorAutoCompleteItem[]
+
+    const groups = (groupData || []).map((u) => ({
+      ...u,
+      shareType: ShareTypes.group.value
+    })) as CollaboratorAutoCompleteItem[]
+
+    autocompleteResults.value = [...users, ...groups].filter(
+      (collaborator: CollaboratorAutoCompleteItem) => {
+        if (collaborator.id === userStore.user.id) {
+          // filter current user
+          return false
+        }
+
+        const selected = unref(selectedCollaborators).some(({ id }) => collaborator.id === id)
+        const existingShares = unref(collaboratorShares).filter((c) => !c.indirect)
+        const exists = existingShares.some((s) => s.sharedWith.id === collaborator.id)
+
+        if (selected || exists) {
+          return false
+        }
+
+        announcement.value = $gettext('Person was added')
+
+        return true
+      }
+    )
+  } finally {
+    // restartable() cancels a superseded instance via this signal before unwinding into
+    // finally — skip clearing the flag then, or it clobbers the instance still running.
+    if (!signal.aborted) {
+      searchInProgress.value = false
+    }
+  }
 }).restartable()
 
 let fetchRecipients = async (query: string) => {

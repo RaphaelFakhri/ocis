@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/CiscoM31/godata"
 	invitepb "github.com/cs3org/go-cs3apis/cs3/ocm/invite/v1beta1"
@@ -386,7 +387,7 @@ func (g Graph) GetUsers(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case odataReq.Query.Filter != nil:
-		users, err = g.applyUserFilter(r.Context(), odataReq, nil)
+		users, err = g.applyUserFilter(withOCMAcceptedUsersCache(r.Context()), odataReq, nil)
 	case username != "" && instancename != "" && g.contextUserHasExternalSharePermission(r.Context()):
 		users = make([]*libregraph.User, 1)
 		users[0], err = g.identityBackend.GetPreciseUser(r.Context(), username, instancename, odataReq)
@@ -1167,6 +1168,19 @@ func isValidUserType(userType string) bool {
 }
 
 func (g Graph) searchOCMAcceptedUsers(ctx context.Context, odataReq *godata.GoDataRequest) ([]*libregraph.User, error) {
+	cache, hasCache := ctx.Value(ocmAcceptedUsersCacheKey{}).(*ocmAcceptedUsersCache)
+	if !hasCache {
+		return g.searchOCMAcceptedUsersUncached(ctx, odataReq)
+	}
+	cache.buildOnce.Do(func() {
+		cache.fn = sync.OnceValues(func() ([]*libregraph.User, error) {
+			return g.searchOCMAcceptedUsersUncached(ctx, odataReq)
+		})
+	})
+	return cache.fn()
+}
+
+func (g Graph) searchOCMAcceptedUsersUncached(ctx context.Context, odataReq *godata.GoDataRequest) ([]*libregraph.User, error) {
 	logger := g.logger.SubloggerWithRequestID(ctx)
 	users := []*libregraph.User{}
 

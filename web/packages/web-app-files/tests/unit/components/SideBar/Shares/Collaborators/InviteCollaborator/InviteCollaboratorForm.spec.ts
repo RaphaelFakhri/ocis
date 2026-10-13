@@ -4,13 +4,19 @@ import InviteCollaboratorForm from '../../../../../../../src/components/SideBar/
 import {
   defaultComponentMocks,
   defaultPlugins,
+  flushPromises,
   RouteLocation,
   shallowMount,
   VueWrapper
 } from '@ownclouders/web-test-helpers'
 import { Resource, SpaceResource, VAULT_STORAGE_PROVIDER_ID } from '@ownclouders/web-client'
 import { useSharesStore } from '@ownclouders/web-pkg'
-import { CollaboratorAutoCompleteItem, CollaboratorShare, ShareRole } from '@ownclouders/web-client'
+import {
+  CollaboratorAutoCompleteItem,
+  CollaboratorShare,
+  ShareRole,
+  ShareTypes
+} from '@ownclouders/web-client'
 import { Group, User } from '@ownclouders/web-client/graph/generated'
 import { OcButton } from '@ownclouders/design-system/components'
 import RoleDropdown from '../../../../../../../src/components/SideBar/Shares/Collaborators/RoleDropdown.vue'
@@ -113,6 +119,49 @@ describe('InviteCollaboratorForm', () => {
 
       expect(wrapper.vm.autocompleteResults.length).toBe(1)
     })
+    it('resets searchInProgress after a failed search', async () => {
+      const { wrapper, mocks } = getWrapper()
+      await wrapper.vm.fetchRecipientsTask.last
+
+      mocks.$clientService.graphAuthenticated.users.listUsers.mockRejectedValueOnce(
+        new Error('boom')
+      )
+      wrapper.vm.searchInProgress = true
+      await wrapper.vm.fetchRecipientsTask.perform('teacher').catch(() => {})
+
+      expect(wrapper.vm.searchInProgress).toBe(false)
+    })
+    it('keeps searchInProgress set while a search that superseded a canceled one is still in flight', async () => {
+      const { wrapper, mocks } = getWrapper()
+      await wrapper.vm.fetchRecipientsTask.last
+
+      let resolveSecond: (users: User[]) => void
+      mocks.$clientService.graphAuthenticated.users.listUsers
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveSecond = resolve
+            })
+        )
+
+      wrapper.vm.searchInProgress = true
+      wrapper.vm.fetchRecipientsTask.perform('teac')
+      await flushPromises()
+
+      // restartable(): this cancels the still-pending first instance
+      wrapper.vm.fetchRecipientsTask.perform('teach')
+      await flushPromises()
+
+      // the canceled instance's finally must not have cleared the flag while the
+      // instance that superseded it is still running
+      expect(wrapper.vm.searchInProgress).toBe(true)
+
+      resolveSecond([])
+      await wrapper.vm.fetchRecipientsTask.last
+
+      expect(wrapper.vm.searchInProgress).toBe(false)
+    })
   })
   describe('fetching recipients for a vault resource', () => {
     // vault resources are recognized by the fixed vault storage provider id, not by the
@@ -134,6 +183,16 @@ describe('InviteCollaboratorForm', () => {
         expect.anything()
       )
       expect(mocks.$clientService.graphAuthenticated.groups.listGroups).not.toHaveBeenCalled()
+    })
+    it('tags a federated user returned on the Internal tab as a remote recipient', async () => {
+      const { wrapper } = getWrapper({
+        capabilities: vaultCapabilities,
+        resource: mock<Resource>({ ...folderMock, storageId: VAULT_STORAGE_PROVIDER_ID }),
+        users: [{ id: '2', userType: 'Federated' } as User]
+      })
+      await wrapper.vm.fetchRecipientsTask.last
+
+      expect(wrapper.vm.autocompleteResults[0].shareType).toBe(ShareTypes.remote.value)
     })
     it('recognizes a vault space resource, which carries the full drive id', async () => {
       const { wrapper, mocks } = getWrapper({
@@ -177,6 +236,20 @@ describe('InviteCollaboratorForm', () => {
         expect.objectContaining({ filter: undefined }),
         expect.anything()
       )
+    })
+    it('keeps restricting to vault-eligible users after switching to the External tab', async () => {
+      const { wrapper, mocks } = getWrapper({
+        capabilities: vaultCapabilities,
+        resource: mock<Resource>({ ...folderMock, storageId: VAULT_STORAGE_PROVIDER_ID }),
+        externalShareRoles: [mock<ShareRole>()]
+      })
+      await wrapper.vm.fetchRecipientsTask.last
+
+      wrapper.vm.currentShareRoleType = mock<ShareRoleType>({ id: '2' })
+      await wrapper.vm.fetchRecipientsTask.perform('teacher')
+
+      const lastCall = mocks.$clientService.graphAuthenticated.users.listUsers.mock.calls.at(-1)
+      expect(lastCall[0].filter).toBe(`(userType eq 'Federated') and (vaultEligible eq true)`)
     })
   })
   describe('vault default expiration notice', () => {

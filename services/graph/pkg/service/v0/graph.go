@@ -170,21 +170,24 @@ func hasAcceptableSearch(query *godata.GoDataQuery, minSearchLength int) bool {
 	return len(query.Search.RawValue) >= minSearchLength
 }
 
-// regular users can only filter by userType or vaultEligible
+// godata's 'and' is binary and left-associative, so an N-clause filter nests left; recurse.
 func hasAcceptableFilter(query *godata.GoDataQuery) bool {
-	switch {
-	case query == nil || query.Filter == nil:
+	if query == nil || query.Filter == nil {
 		return true
-	case query.Filter.Tree.Token.Type != godata.ExpressionTokenLogical:
-		return false
-	case query.Filter.Tree.Token.Value != "eq":
-		return false
-	case query.Filter.Tree.Children[0].Token.Value != "userType" &&
-		query.Filter.Tree.Children[0].Token.Value != vaultEligible:
-		return false
 	}
+	return hasAcceptableFilterNode(query.Filter.Tree)
+}
 
-	return true
+func hasAcceptableFilterNode(node *godata.ParseNode) bool {
+	if node.Token.Type == godata.ExpressionTokenLogical && node.Token.Value == "and" {
+		return len(node.Children) == 2 &&
+			hasAcceptableFilterNode(node.Children[0]) &&
+			hasAcceptableFilterNode(node.Children[1])
+	}
+	return node.Token.Type == godata.ExpressionTokenLogical &&
+		node.Token.Value == "eq" &&
+		len(node.Children) == 2 &&
+		(node.Children[0].Token.Value == "userType" || node.Children[0].Token.Value == vaultEligible)
 }
 
 // regular users can only use basic queries without any expansions, computes or applies

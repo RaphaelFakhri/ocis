@@ -3,6 +3,8 @@ package svc
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/CiscoM31/godata"
 	libregraph "github.com/owncloud/libre-graph-api-go"
@@ -23,6 +25,18 @@ const (
 	// vaultEligible filters for users that may be granted access to vault resources
 	vaultEligible = "vaultEligible"
 )
+
+type ocmAcceptedUsersCacheKey struct{}
+
+// sync.OnceValues keeps this safe if two filter branches ever race on the same cache.
+type ocmAcceptedUsersCache struct {
+	buildOnce sync.Once
+	fn        func() ([]*libregraph.User, error)
+}
+
+func withOCMAcceptedUsersCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ocmAcceptedUsersCacheKey{}, &ocmAcceptedUsersCache{})
+}
 
 func invalidFilterError() error {
 	return godata.BadRequestError("invalid filter")
@@ -75,6 +89,7 @@ func (g Graph) applyFilterFunction(ctx context.Context, req *godata.GoDataReques
 	return users, unsupportedFilterError()
 }
 
+// Deliberately does not search OCM-federated users, unlike applyFilterEq/applyFilterVaultEligible.
 func (g Graph) applyFilterFunctionStartsWith(ctx context.Context, req *godata.GoDataRequest, operand1 *godata.ParseNode, operand2 *godata.ParseNode) (users []*libregraph.User) {
 	logger := g.logger.SubloggerWithRequestID(ctx)
 	if operand1.Token.Type != godata.ExpressionTokenLiteral {
@@ -101,6 +116,7 @@ func (g Graph) applyFilterFunctionStartsWith(ctx context.Context, req *godata.Go
 	}
 }
 
+// Deliberately does not search OCM-federated users, unlike applyFilterEq/applyFilterVaultEligible.
 func (g Graph) applyFilterFunctionContains(ctx context.Context, req *godata.GoDataRequest, operand1 *godata.ParseNode, operand2 *godata.ParseNode) (users []*libregraph.User) {
 	logger := g.logger.SubloggerWithRequestID(ctx)
 	if operand1.Token.Type != godata.ExpressionTokenLiteral {
@@ -221,17 +237,7 @@ func (g Graph) applyFilterLogicalOr(ctx context.Context, req *godata.GoDataReque
 		return []*libregraph.User{}, err
 	}
 
-	// We now have two slices with results of the subfilters. Now turn one of them
-	// into a map for efficiently getting the union of both slices
-	userSet := userSliceToMap(res1)
-	filteredUsers := make([]*libregraph.User, 0, len(res1)+len(res2))
-	filteredUsers = append(filteredUsers, res1...)
-	for _, user := range res2 {
-		if _, found := userSet[user.GetId()]; !found {
-			filteredUsers = append(filteredUsers, user)
-		}
-	}
-	return filteredUsers, nil
+	return unionUsersByID(res1, res2), nil
 }
 
 func (g Graph) applyFilterEq(ctx context.Context, req *godata.GoDataRequest, operand1 *godata.ParseNode, operand2 *godata.ParseNode) (users []*libregraph.User, err error) {
@@ -262,26 +268,65 @@ func (g Graph) applyFilterEq(ctx context.Context, req *godata.GoDataRequest, ope
 	return users, unsupportedFilterError()
 }
 
+// var, not const, so a test can lower it.
+var _vaultEligibleOCMSearchTimeout = 3 * time.Second
+
 // applyFilterVaultEligible resolves `vaultEligible eq true`, the filter the share recipient
 // picker sends while sharing a vault resource. Only `true` is accepted: enumerating the users
 // who may not enter the vault is not a use case the picker has.
 //
-// Eligibility is checked only for the users the directory search actually returned, not for
-// every account in the system: the search runs first, and a per-user role assignment lookup
-// follows only for the (usually few) users it matched. This keeps the cost proportional to the
-// search result instead of the number of accounts in the whole deployment.
+// Eligibility is checked only for users the directory and OCM searches already returned,
+// not the whole deployment — role lookups scale with the match count, not the user count.
 func (g Graph) applyFilterVaultEligible(ctx context.Context, req *godata.GoDataRequest, operand *godata.ParseNode) ([]*libregraph.User, error) {
 	if operand.Token.Type != godata.ExpressionTokenBoolean || operand.Token.Value != "true" {
 		return nil, unsupportedFilterError()
 	}
 
+	logger := g.logger.SubloggerWithRequestID(ctx)
+
 	// This is the share recipient search, and clients only send it once a few characters have
 	// been typed (FRONTEND_SEARCH_MIN_LENGTH). We therefore expect a handful of matching users here,
 	// not the whole directory, which is what makes checking each of them individually below cheap.
-	users, err := g.identityBackend.GetUsers(ctx, req)
-	if err != nil {
-		return nil, err
+	//
+	// a light user from elsewhere may only be known via OCM, not the identity backend — best
+	// effort: an OCM failure (including a timeout) must not fail a vault search that never
+	// involves a federated user.
+	var users, federatedUsers []*libregraph.User
+	var err error
+
+	if !g.config.IncludeOCMSharees {
+		// avoid the errgroup/goroutine overhead when searchOCMAcceptedUsers would be a no-op anyway
+		users, err = g.identityBackend.GetUsers(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var ocmErr error
+		// run the directory search and the OCM search concurrently instead of in series
+		searchEg, searchCtx := errgroup.WithContext(ctx)
+		searchEg.Go(func() error {
+			var err error
+			users, err = g.identityBackend.GetUsers(searchCtx, req)
+			return err
+		})
+		searchEg.Go(func() error {
+			// only the OCM half gets a timeout — a slow gateway must not block the directory search
+			ocmCtx, cancel := context.WithTimeout(searchCtx, _vaultEligibleOCMSearchTimeout)
+			defer cancel()
+			federatedUsers, ocmErr = g.searchOCMAcceptedUsers(ocmCtx, req)
+			return nil
+		})
+		if err := searchEg.Wait(); err != nil {
+			return nil, err
+		}
+
+		if ocmErr != nil {
+			logger.Warn().Err(ocmErr).Msg("failed to search OCM accepted users for vault eligibility")
+		} else {
+			users = unionUsersByID(users, federatedUsers)
+		}
 	}
+
 	if len(users) == 0 {
 		return users, nil
 	}
@@ -580,4 +625,19 @@ func userSliceToMap(users []*libregraph.User) map[string]*libregraph.User {
 		resMap[user.GetId()] = user
 	}
 	return resMap
+}
+
+// unionUsersByID returns a followed by the users in b not already present in a, deduping both
+// against a and against duplicate ids within b itself.
+func unionUsersByID(a, b []*libregraph.User) []*libregraph.User {
+	seen := userSliceToMap(a)
+	result := make([]*libregraph.User, 0, len(a)+len(b))
+	result = append(result, a...)
+	for _, user := range b {
+		if _, found := seen[user.GetId()]; !found {
+			result = append(result, user)
+			seen[user.GetId()] = user
+		}
+	}
+	return result
 }
