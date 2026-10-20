@@ -1239,19 +1239,20 @@ func (f *FileConnector) CheckFileInfo(ctx context.Context) (*ConnectorResponse, 
 	privateLinkURL := &url.URL{}
 	*privateLinkURL = *ocisURL
 	privateLinkURL.Path = path.Join(ocisURL.Path, "f", storagespace.FormatResourceID(statRes.GetInfo().GetId()))
-	parentFolderURL := &url.URL{}
-	*parentFolderURL = *ocisURL
+	// folderLinkURL leads back to the file's folder in the file list. It links to the file
+	// itself rather than its parent: the parent might lie outside of what the user can
+	// access (e.g. for a shared file), so the web app resolves the right folder.
+	// openWithDefaultApp=false keeps it from reopening the file.
+	folderLinkURL := &url.URL{}
+	*folderLinkURL = *ocisURL
 	if !isPublicShare {
-		// Link to the file itself instead of its parent folder: the parent might lie outside
-		// of what the user can access (e.g. for a shared file), so let the web app resolve
-		// the right folder. openWithDefaultApp=false keeps it from reopening the file.
-		parentFolderURL.Path = privateLinkURL.Path
-		parentFolderURL.RawQuery = "openWithDefaultApp=false"
+		folderLinkURL.Path = privateLinkURL.Path
+		folderLinkURL.RawQuery = "openWithDefaultApp=false"
 	} else {
 		if scopes, ok := ctxpkg.ContextGetScopes(ctx); ok {
 			publicShare := &link.PublicShare{}
 			if err := f.getScopeByKeyPrefix(scopes, "publicshare:", publicShare); err == nil {
-				parentFolderURL.Path = path.Join(ocisURL.Path, "s", publicShare.GetToken())
+				folderLinkURL.Path = path.Join(ocisURL.Path, "s", publicShare.GetToken())
 			} else {
 				logger.Error().Err(err).Msg("CheckFileInfo: error getting public share scope")
 			}
@@ -1261,7 +1262,7 @@ func (f *FileConnector) CheckFileInfo(ctx context.Context) (*ConnectorResponse, 
 	}
 	// BreadcrumbBrandURL points at the space's root resource, exposing an internal
 	// space/resource id; for public shares an anonymous user has no other way to reach
-	// that id, so (like parentFolderURL above) the link is withheld. BreadcrumbBrandName
+	// that id, so (like folderLinkURL above) the link is withheld. BreadcrumbBrandName
 	// is just a display string, not a navigable link, so it stays populated either way.
 	// Only build the link when the stat response actually carries space info: without a
 	// root resource id there is nothing to point at, and joining an empty id into the
@@ -1301,12 +1302,12 @@ func (f *FileConnector) CheckFileInfo(ctx context.Context) (*ConnectorResponse, 
 		fileinfo.KeyBreadcrumbDocName: path.Base(statRes.GetInfo().GetPath()),
 		// to get the folder we actually need to do a GetPath() request
 		fileinfo.KeyBreadcrumbFolderName: breadcrumbFolderName,
-		fileinfo.KeyBreadcrumbFolderURL:  parentFolderURL.String(),
+		fileinfo.KeyBreadcrumbFolderURL:  folderLinkURL.String(),
 		fileinfo.KeyBreadcrumbBrandName:  statRes.GetInfo().GetSpace().GetName(),
 		fileinfo.KeyBreadcrumbBrandURL:   breadcrumbBrandURL,
-		// the WOPI client should navigate here when the editor is closed; the folder
-		// containing the file is the same target used for the breadcrumb folder link
-		fileinfo.KeyCloseURL: parentFolderURL.String(),
+		// the WOPI client should navigate here when the editor is closed; this is the
+		// same target used for the breadcrumb folder link
+		fileinfo.KeyCloseURL: folderLinkURL.String(),
 
 		fileinfo.KeyHostViewURL:    createHostUrl("view", ocisURL, f.cfg.App.Name, statRes.GetInfo()),
 		fileinfo.KeyHostEditURL:    createHostUrl("write", ocisURL, f.cfg.App.Name, statRes.GetInfo()),

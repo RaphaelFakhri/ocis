@@ -3393,7 +3393,11 @@ var _ = Describe("FileConnector", func() {
 			// (see the "/path/to" expectation in the "Stat success" test above) and is not
 			// something this task changes.
 			Expect(collaboraResponse.BreadcrumbFolderName).To(Equal("/personal/user/Documents"))
+			// the folder link points at the file, not its parent folder: the parent might not be
+			// accessible to the user (e.g. a sharee), the web app resolves the folder instead
 			Expect(collaboraResponse.BreadcrumbFolderURL).To(Equal("https://ocis.example.prv/f/storageid$spaceid%21fileid?openWithDefaultApp=false"))
+			Expect(collaboraResponse.BreadcrumbFolderURL).ToNot(ContainSubstring("documentsid"))
+			Expect(collaboraResponse.CloseURL).To(Equal(collaboraResponse.BreadcrumbFolderURL))
 		})
 
 		It("Collabora CheckFileInfo breadcrumb folder name falls back to the space name for a file at the space root", func() {
