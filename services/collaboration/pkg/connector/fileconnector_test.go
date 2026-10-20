@@ -1807,7 +1807,7 @@ var _ = Describe("FileConnector", func() {
 				BaseFileName:               "test.txt",
 				BreadcrumbDocName:          "test.txt",
 				BreadcrumbFolderName:       "/path/to",
-				BreadcrumbFolderURL:        "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				BreadcrumbFolderURL:        "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				UserCanNotWriteRelative:    false,
 				SupportsExtendedLockLength: true,
 				SupportsGetLock:            true,
@@ -1823,7 +1823,7 @@ var _ = Describe("FileConnector", func() {
 				FileVersionURL:             "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?details=versions",
 				HostEditURL:                "https://ocis.example.prv/external-test/path/to/test.txt?fileId=storageid%24spaceid%21opaqueid&view_mode=write",
 				HostViewURL:                "https://ocis.example.prv/external-test/path/to/test.txt?fileId=storageid%24spaceid%21opaqueid&view_mode=view",
-				CloseURL:                   "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				CloseURL:                   "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				DownloadURL:                "", // Remove the hardcoded token since it's dynamically generated
 			}
 
@@ -2122,13 +2122,13 @@ var _ = Describe("FileConnector", func() {
 				UserCanRename:           false,
 				BreadcrumbDocName:       "test.txt",
 				BreadcrumbFolderName:    "/path/to",
-				BreadcrumbFolderURL:     "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				BreadcrumbFolderURL:     "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				PostMessageOrigin:       "https://ocis.example.prv",
 				EditModePostMessage:     true,
 				Version:                 "v162738490",
 				LastModifiedTime:        "1970-07-08T08:30:49.0000000Z",
 				ReadOnly:                true,
-				CloseURL:                "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				CloseURL:                "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				DownloadURL:             "", // Remove the hardcoded token since it's dynamically generated
 				FileSharingURL:          "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?details=sharing",
 				FileVersionURL:          "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?details=versions",
@@ -2325,13 +2325,13 @@ var _ = Describe("FileConnector", func() {
 				UserCanRename:           false,
 				BreadcrumbDocName:       "test.txt",
 				BreadcrumbFolderName:    "/path/to",
-				BreadcrumbFolderURL:     "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				BreadcrumbFolderURL:     "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				PostMessageOrigin:       "https://ocis.example.prv",
 				EditModePostMessage:     true,
 				Version:                 "v162738490",
 				LastModifiedTime:        "1970-07-08T08:30:49.0000000Z",
 				ReadOnly:                true,
-				CloseURL:                "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				CloseURL:                "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				DownloadURL:             "", // Remove the hardcoded token since it's dynamically generated
 				FileSharingURL:          "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?details=sharing",
 				FileVersionURL:          "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?details=versions",
@@ -2818,7 +2818,7 @@ var _ = Describe("FileConnector", func() {
 				BaseFileName:            "test.txt",
 				BreadcrumbDocName:       "test.txt",
 				BreadcrumbFolderName:    "/path/to",
-				BreadcrumbFolderURL:     "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				BreadcrumbFolderURL:     "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 				UserCanNotWriteRelative: false,
 				SupportsLocks:           true,
 				SupportsUpdate:          true,
@@ -2832,7 +2832,7 @@ var _ = Describe("FileConnector", func() {
 				HostEditURL:             "https://ocis.example.prv/external-onlyoffice/path/to/test.txt?fileId=storageid%24spaceid%21opaqueid&view_mode=write",
 				PostMessageOrigin:       "https://ocis.example.prv",
 				TemplateSource:          "", // Remove the hardcoded token since it's dynamically generated
-				CloseURL:                "https://ocis.example.prv/f/storageid$spaceid%21parentopaqueid",
+				CloseURL:                "https://ocis.example.prv/f/storageid$spaceid%21opaqueid?openWithDefaultApp=false",
 			}
 
 			// change wopi app provider
@@ -3393,7 +3393,7 @@ var _ = Describe("FileConnector", func() {
 			// (see the "/path/to" expectation in the "Stat success" test above) and is not
 			// something this task changes.
 			Expect(collaboraResponse.BreadcrumbFolderName).To(Equal("/personal/user/Documents"))
-			Expect(collaboraResponse.BreadcrumbFolderURL).To(Equal("https://ocis.example.prv/f/storageid$spaceid%21documentsid"))
+			Expect(collaboraResponse.BreadcrumbFolderURL).To(Equal("https://ocis.example.prv/f/storageid$spaceid%21fileid?openWithDefaultApp=false"))
 		})
 
 		It("Collabora CheckFileInfo breadcrumb folder name falls back to the space name for a file at the space root", func() {

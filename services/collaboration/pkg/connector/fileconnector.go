@@ -1242,7 +1242,11 @@ func (f *FileConnector) CheckFileInfo(ctx context.Context) (*ConnectorResponse, 
 	parentFolderURL := &url.URL{}
 	*parentFolderURL = *ocisURL
 	if !isPublicShare {
-		parentFolderURL.Path = path.Join(ocisURL.Path, "f", storagespace.FormatResourceID(statRes.GetInfo().GetParentId()))
+		// Link to the file itself instead of its parent folder: the parent might lie outside
+		// of what the user can access (e.g. for a shared file), so let the web app resolve
+		// the right folder. openWithDefaultApp=false keeps it from reopening the file.
+		parentFolderURL.Path = privateLinkURL.Path
+		parentFolderURL.RawQuery = "openWithDefaultApp=false"
 	} else {
 		if scopes, ok := ctxpkg.ContextGetScopes(ctx); ok {
 			publicShare := &link.PublicShare{}
